@@ -1,0 +1,22 @@
+# Web Server & API
+fastapi
+uvicorn[standard]
+python-socketio
+python-multipart
+
+# AI & LLM integration
+openai
+langchain
+langchain-openai
+langchain-community
+
+# Vector Database (Memory)
+chromadb
+pysqlite3-binary  # Often needed for ChromaDB on Windows/Linux
+
+# Audio Processing (The Ears)
+openai-whisper
+numpy
+
+# Environment Variables
+python-dotenv
