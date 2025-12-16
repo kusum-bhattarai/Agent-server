@@ -105,7 +105,7 @@ async def cancel_previous_task(sid):
         del user_tasks[sid]
 
 @sio.event
-async def interrupt(sid, data):
+async def interrupt(sid, data=None):
     """
     Unity calls this event immediately when it detects the user starts speaking.
     """
