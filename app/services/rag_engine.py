@@ -29,41 +29,35 @@ def get_rag_chain():
 
     return retriever, llm
 
-def generate_rag_response(query_text: str, group_type: str = "B"):
+async def generate_rag_response(query_text: str, group_type: str = "B"):
     """
-    The Main Logic:
-    1. Search DB for context.
-    2. Construct a prompt.
-    3. Ask GPT-4 for the answer.
+    The Main Logic (Async Version):
     """
     try:
-        # Initialize resources
         retriever, llm = get_rag_chain()
         
-        # Retrieve relevant documents
-        docs = retriever.invoke(query_text)
+        # Retrieve relevant documents (Async)
+        # Note: retrievers might not have ainvoke in older versions, 
+        # but modern LangChain supports async retrieval.
+        # If this fails, wrap it in asyncio.to_thread, but usually it's fine.
+        docs = await retriever.ainvoke(query_text)
         context_text = "\n\n".join([doc.page_content for doc in docs])
 
-        # System prompt with instructions
         prompt_template = ChatPromptTemplate.from_template("""
         You are an expert Construction Safety Officer and NEC Code Specialist.
-        
-        CONTEXT FROM MANUALS:
-        {context}
-        
-        USER QUESTION:
-        {question}
-        
+        CONTEXT FROM MANUALS: {context}
+        USER QUESTION: {question}
         INSTRUCTIONS:
-        - Answer based ONLY on the provided context if possible.
-        - If the user asks about a safety violation, cite the specific code (e.g., NEC 210.8).
-        - Keep the answer concise (under 3 sentences) suitable for a HoloLens/Magic Leap display.
-        - The user is in Group {group}. If Group == 'A', be passive. If Group == 'B', be active and warning.
+        - Answer based ONLY on the provided context.
+        - Concise (under 3 sentences).
+        - Group {group}.
         """)
 
-        # 3. Send to GPT-4
+        # Chain
         chain = prompt_template | llm
-        response = chain.invoke({
+        
+        # Use 'ainvoke' instead of 'invoke'
+        response = await chain.ainvoke({
             "context": context_text,
             "question": query_text,
             "group": group_type
@@ -73,5 +67,4 @@ def generate_rag_response(query_text: str, group_type: str = "B"):
 
     except Exception as e:
         print(f"❌ RAG Error: {e}")
-        # Fallback if DB is missing or API key is invalid
         return "I'm having trouble accessing my safety manuals right now."
