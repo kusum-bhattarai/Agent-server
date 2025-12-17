@@ -1,6 +1,4 @@
-import os
 import io
-import wave  
 import openai
 from dotenv import load_dotenv
 
@@ -8,42 +6,25 @@ load_dotenv()
 client = openai.OpenAI()
 
 def transcribe_audio(audio_bytes):
+    """
+    Handles incoming audio. 
+    Now expects a valid WAV file (starting with b'RIFF') from the client.
+    """
     try:
-        # Check if we need to convert Raw PCM to WAV
-        # If the file header doesn't start with 'RIFF', it's likely raw PCM.
+        # 1. Validation: Check if it's actually a WAV file
+        # A valid WAV file always starts with the bytes "RIFF"
         if not audio_bytes.startswith(b'RIFF'):
-            print("⚠️ Raw PCM detected. Wrapping in WAV header...")
-            
-            # Create a new buffer for the WAV file
-            wav_buffer = io.BytesIO()
-            
-            # PARAMETERS: You MUST match what Magic Leap is sending.
-            # Standard Unity mic capture is often:
-            # Channels: 1 (Mono)
-            # Sample Width: 2 (16-bit)
-            # Frame Rate: 44100 or 48000 Hz
-            CHANNELS = 1
-            SAMPLE_WIDTH = 2 
-            FRAME_RATE = 44100 
-            
-            with wave.open(wav_buffer, 'wb') as wav_file:
-                wav_file.setnchannels(CHANNELS)
-                wav_file.setsampwidth(SAMPLE_WIDTH)
-                wav_file.setframerate(FRAME_RATE)
-                wav_file.writeframes(audio_bytes)
-            
-            # Reset buffer position to start so OpenAI can read it
-            wav_buffer.seek(0)
-            audio_file = wav_buffer
-            audio_file.name = "audio.wav"
-            
-        else:
-            # It already has a WAV header
-            audio_file = io.BytesIO(audio_bytes)
-            audio_file.name = "audio.wav"
+            print(f"⚠️ Error: Received {len(audio_bytes)} bytes, but missing WAV header (RIFF).")
+            print("   Make sure Unity is encoding to WAV, not just sending raw samples.")
+            return ""
 
-        # 2. Call Whisper API
-        print("👂 Transcribing audio...")
+        # 2. Prepare for OpenAI
+        # We wrap the bytes in a BytesIO object so it looks like a file
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = "audio.wav"  # Important: OpenAI needs a filename extension
+
+        # 3. Transcribe
+        print(f"👂 Transcribing {len(audio_bytes)} bytes...")
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
