@@ -1,113 +1,140 @@
 import socketio
 import asyncio
-
+import base64
+ 
 from app.services.transcription import transcribe_audio
 from app.services.rag_engine import generate_rag_response
-
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
-
-# This wraps the socket server so FastAPI can mount it later.
+ 
+sio = socketio.AsyncServer(
+    async_mode="asgi",
+    cors_allowed_origins="*",
+    max_http_buffer_size=20_000_000,  # allow bigger WAV payloads
+)
+ 
 socket_app = socketio.ASGIApp(sio)
-
-# Dictionary to store the current running task for each user
-# Format: { 'session_id': asyncio.Task }
-user_tasks = {}
-
-# --- EVENT LISTENERS ---
-
+ 
+user_tasks: dict[str, asyncio.Task] = {}
+ 
+ 
+def normalize_audio_bytes(data) -> bytes:
+    """
+    Accepts:
+      - bytes/bytearray (best case)
+      - list of ints (sometimes happens depending on client serializer)
+      - base64 string
+      - dict { "audio": ... }
+    Returns bytes (WAV).
+    """
+    if data is None:
+        return b""
+ 
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data)
+ 
+    if isinstance(data, list):
+        # list of ints 0-255
+        return bytes(data)
+ 
+    if isinstance(data, dict):
+        # try common key
+        if "audio" in data:
+            return normalize_audio_bytes(data["audio"])
+        # last resort: if dict contains one value
+        if len(data) == 1:
+            return normalize_audio_bytes(next(iter(data.values())))
+        return b""
+ 
+    if isinstance(data, str):
+        # assume base64
+        try:
+            return base64.b64decode(data)
+        except Exception:
+            return b""
+ 
+    # Unknown type
+    return b""
+ 
+ 
 @sio.event
 async def connect(sid, environ):
-    """
-    Triggered automatically when Unity connects.
-    'sid' is the unique Session ID for that specific user.
-    """
     print(f"✅ Client connected: {sid}")
-    
-    # Send a welcome message back to the client
-    await sio.emit('server_status', {'msg': 'Connection successful', 'status': 'online'}, room=sid)
-
+    await sio.emit("server_status", {"msg": "Connection successful", "status": "online"}, room=sid)
+ 
+ 
 @sio.event
 async def disconnect(sid):
-    """
-    Triggered when the client closes the app or loses internet.
-    """
     print(f"❌ Client disconnected: {sid}")
-
+    await cancel_previous_task(sid)
+ 
+ 
 @sio.event
 async def ping(sid, data):
-    """
-    A simple test event. 
-    If Unity sends 'ping', we reply with 'pong'.
-    """
     print(f"📩 Received ping from {sid}: {data}")
-    await sio.emit('pong', {'msg': 'Server is alive!'}, room=sid)
-
-async def process_user_audio(sid, audio_data):
-    """
-    The actual logic for processing audio.
-    We wrap this in a function so we can run it as a cancellable Task.
-    """
-    try:
-        # 1. Transcribe (Blocking but fast enough, or make async if needed)
-        # Note: Ideally run this in a thread executor if it takes >1s
-        user_text = await asyncio.to_thread(transcribe_audio, audio_data)
-        
-        if not user_text:
-            await sio.emit('agent_response', {'text': "I couldn't hear you clearly."}, room=sid)
-            return
-
-        print(f"📝 Transcribed ({sid}): {user_text}")
-
-        # 2. Process (The Brain) - Now Async!
-        ai_answer = await generate_rag_response(user_text, group_type="B")
-
-        # 3. Respond
-        await sio.emit('agent_response', {'text': ai_answer}, room=sid)
-        print(f"📤 Sent reply to {sid}")
-
-    except asyncio.CancelledError:
-        print(f"🔇 Task cancelled for {sid} (User interrupted)")
-        # Optionally tell Unity to stop playing any queued audio
-        await sio.emit('stop_audio', {}, room=sid)
-        raise # Re-raise to ensure proper task cleanup
-
-@sio.event
-async def audio_stream(sid, data):
-    """
-    Event: 'audio_stream'
-    Expected behavior: Unity sends this when silence is detected (user finished sentence).
-    """
-    print(f"🎤 Received audio stream from {sid}")
-
-    # 1. If the bot was already thinking/talking, STOP it first.
-    await cancel_previous_task(sid)
-
-    # 2. Start the new processing task
-    task = asyncio.create_task(process_user_audio(sid, data))
-    
-    # 3. Save the task so we can interrupt it later
-    user_tasks[sid] = task
-
+    await sio.emit("pong", {"msg": "Server is alive!"}, room=sid)
+ 
+ 
 async def cancel_previous_task(sid):
-    """
-    Cancels any ongoing RAG/processing task for this user.
-    """
-    if sid in user_tasks:
-        task = user_tasks[sid]
-        if not task.done():
-            print(f"🛑 Interrupting previous task for {sid}...")
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                print(f"✅ Task for {sid} cancelled successfully.")
-        # Remove from dict
-        del user_tasks[sid]
-
+    task = user_tasks.get(sid)
+    if task and not task.done():
+        print(f"🛑 Interrupting previous task for {sid}...")
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            print(f"✅ Task for {sid} cancelled.")
+    user_tasks.pop(sid, None)
+ 
+ 
 @sio.event
 async def interrupt(sid, data=None):
-    """
-    Unity calls this event immediately when it detects the user starts speaking.
-    """
     print(f"✋ Interruption signal from {sid}")
     await cancel_previous_task(sid)
+    await sio.emit("stop_audio", {}, room=sid)
+ 
+ 
+async def process_user_audio(sid, wav_bytes: bytes):
+    try:
+        # Basic validation
+        if not wav_bytes:
+            await sio.emit("agent_response", {"text": "I didn't receive any audio."}, room=sid)
+            return
+ 
+        # WAV header check (optional but helpful)
+        if not (len(wav_bytes) >= 12 and wav_bytes[0:4] == b"RIFF" and wav_bytes[8:12] == b"WAVE"):
+            print(f"⚠️ Audio for {sid} is not WAV RIFF/WAVE header. len={len(wav_bytes)}")
+            # You can still try to transcribe, but most STT expects WAV.
+ 
+        print(f"🧾 Audio bytes received for {sid}: {len(wav_bytes)}")
+ 
+        # Transcribe (sync -> thread)
+        user_text = await asyncio.to_thread(transcribe_audio, wav_bytes)
+ 
+        if not user_text:
+            await sio.emit("agent_response", {"text": "I couldn't hear you clearly."}, room=sid)
+            return
+ 
+        print(f"📝 Transcribed ({sid}): {user_text}")
+ 
+        ai_answer = await generate_rag_response(user_text, group_type="B")
+        await sio.emit("agent_response", {"text": ai_answer}, room=sid)
+        print(f"📤 Sent reply to {sid}")
+ 
+    except asyncio.CancelledError:
+        print(f"🔇 Task cancelled for {sid}")
+        await sio.emit("stop_audio", {}, room=sid)
+        raise
+ 
+    except Exception as e:
+        print(f"❌ Error processing audio for {sid}: {e}")
+        await sio.emit("agent_response", {"text": "Server error while processing audio."}, room=sid)
+ 
+ 
+@sio.event
+async def audio_stream(sid, data):
+    wav_bytes = normalize_audio_bytes(data)
+    print(f"🎤 Received audio_stream from {sid}: type={type(data)} bytes={len(wav_bytes)}")
+ 
+    await cancel_previous_task(sid)
+ 
+    task = asyncio.create_task(process_user_audio(sid, wav_bytes))
+    user_tasks[sid] = task
