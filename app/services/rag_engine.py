@@ -29,26 +29,39 @@ def get_rag_chain():
 
     return retriever, llm
 
-async def generate_rag_response(query_text: str, group_type: str = "B"):
+async def generate_rag_response(query_text: str, history: list = None, group_type: str = "B"):
     """
     The Main Logic (Async Version):
+    - Now accepts 'history' to support follow-up questions.
     """
     try:
         retriever, llm = get_rag_chain()
         
-        # Retrieve relevant documents (Async)
-        # Note: retrievers might not have ainvoke in older versions, 
-        # but modern LangChain supports async retrieval.
-        # If this fails, wrap it in asyncio.to_thread, but usually it's fine.
+        # 1. Format History for the Prompt
+        # Converts list of tuples [('human', 'hi'), ('ai', 'hello')] into a text block
+        history_text = ""
+        if history:
+            for role, text in history:
+                history_text += f"{role.upper()}: {text}\n"
+        
+        # 2. Retrieve relevant documents
         docs = await retriever.ainvoke(query_text)
         context_text = "\n\n".join([doc.page_content for doc in docs])
 
+        # 3. Updated Prompt with History
         prompt_template = ChatPromptTemplate.from_template("""
         You are an expert Construction Safety Officer and NEC Code Specialist.
+        
+        PREVIOUS CONVERSATION:
+        {history}
+
         CONTEXT FROM MANUALS: {context}
-        USER QUESTION: {question}
+        
+        CURRENT USER QUESTION: {question}
+        
         INSTRUCTIONS:
-        - Answer based ONLY on the provided context.
+        - Answer based ONLY on the provided context and conversation history.
+        - If the user asks a follow-up question (like "what about for high voltage?"), use the Previous Conversation to understand context.
         - Concise (under 3 sentences).
         - Group {group}.
         """)
@@ -56,15 +69,15 @@ async def generate_rag_response(query_text: str, group_type: str = "B"):
         # Chain
         chain = prompt_template | llm
         
-        # Use 'ainvoke' instead of 'invoke'
         response = await chain.ainvoke({
             "context": context_text,
             "question": query_text,
+            "history": history_text,  # Pass the formatted history string
             "group": group_type
         })
 
         return response.content
 
     except Exception as e:
-        print(f"❌ RAG Error: {e}")
+        print(f"-- RAG Error: {e}")
         return "I'm having trouble accessing my safety manuals right now."
